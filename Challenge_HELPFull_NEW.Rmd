@@ -1,0 +1,982 @@
+---
+title: "Projet_STA211_HELPFull_New"
+author: "KOUAME Armel & TRAORE Karim"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+library(caret)
+library(mice)       
+library(micemd)
+library(FactoMineR)
+library(parallel)   
+library(DescTools)
+library(stats)
+library(stats4)
+library(VIM)
+library(mvtnorm)
+library(funModeling)
+library(stargazer)
+library(naniar)
+library(dplyr)
+library(UBL)
+library(ClustOfVar) 
+library(corrplot)
+library(stargazer)
+library(lattice)
+library(gridExtra)
+library(BioStatR)
+library(missMDA) 
+library(visdat)
+library(factoextra)  
+library(rstatix)
+
+library(MLmetrics)
+set.seed(316798)
+```
+
+```{r}
+library(reticulate)
+use_python("/opt/anaconda3/envs/pyspark_env/bin/python3.10", required = TRUE)
+#use_virtualenv("r-reticulate")
+#py_install("pandas")
+```
+
+# Introduction
+# I. Aperçu générale et description du jeu de données (Analyse exploratoire)
+
+```{r}
+# Chargement du jeu de données
+load("data_train.rda")
+dim(data_train)
+# Chargement du jeu de données
+load("data_test.rda")
+dim(data_test)
+# determinons les dimensions de la matrice des données
+#dim(data_train); dim(data_test)
+```
+
+Le jeu de données HELPFull est issu d'une étude clinique pour des patients adultes hospitalisés et recrutés à partir d’une unité de désintoxication. cette étude consistait à mettre les patients en contact avec les soins de santé primaires après avoir subit une évaluation multidisciplinaire de la part d'une cellule constituée de spécialistes. Deux parties caractérisent ce jeu de données, à savoir une partie qui à reçu cette évaluation et une autre partie des sujets qui n'en n'a pas reçu.
+
+Le jeu de données est composé de 964+482 = 1446 (lignes) enregistrements pour 786 (colonnes) variables, dont une variable reponse denommée "outcome" qui consiste à dire si un individu statistique a été mis en contact (outcome = 1) ou non (outcome = 1) avec les soins de santé primaires.
+
+L'aperçu des primières lignes du jeu de données montre la présence de données manquantes qu'il va falloire s'ateler à gérer dans les sections suivantes.
+
+
+```{r}
+# Aperçu des dix premères lignes sur les cinq premières et cinq dernières colonnes plus la variable reponse.
+head(data_train,10)[,c(1,2,3,4,5,781,782,783,785,785,786)]
+```
+*Tableau 1 : Aperçu des dix prémières lignes du jeu de données sur les cinq premières et cinq dernières colonnes*
+
+
+```{r}
+head(data_test,10)[,c(1,2,3,4,5,781,782,783,785,785)]
+```
+Présence de NA  dans le jeu de données d'apprentissage et de test.
+
+L'affichage du tableau de la statistique descriptive des données vient confirmer la présence de plusieurs variables ayant un nombre élévé de données manquantes.
+
+```{r}
+#summary(data_train)
+skimr::skim(data_train)
+```
+```{r}
+#summary(data_train)
+skimr::skim(data_test)
+```
+Nous constatons la présence de plusieurs valeurs manquantes tant dans le jeu de données d'apprentissage que dans le jeu de données test, avec des taux de NA parfois très élévés. Cela pourrait constituer une difficulter dans la suite de notre étude. Pour palier ce problème, il va falloire imputer ces valeurs manquantes par des valeurs propables. Mais avant, nous allons étudier la distribution de ces valeurs manquantes ainsi que le mécanisme à l'origine de leurs génération, car cela permettra de déduire in fine la méthode d'imputation appropriée à utiliser pour completer le jeu de données.
+
+
+## I.3. Analyse univariée
+
+```{r echo=TRUE}
+table(data_train$outcome)
+# Diagramme en barre de la variable "CARAVAN"
+barplot(table(data_train$outcome),main="outcome")
+```
+**Figure 1: histogramme de la variable cible outcome**
+
+L'observation de la variable cible montre que 400 individus statistique ont été mis en contact avec les soins de santé primaires contre 564 qui ne l'ont pas été. Les fréquences de chaque modalités de la variable cible (outcome) sont de 41,5% pour la modalité 0 et de 58,5% pour la modalité 1. Nous estimons que les modalités de la variable cible ne sont pas déséquilibrées
+
+```{r}
+# Créantion du jeu de données d'ensemble pour l'imputaion simple
+nbtrain <- nrow(data_train) # recupération du nombre de ligne du jeu de données train
+data_test$outcome <- NA  # création d'une colonne outcome dans le jeu de données test avec les valeurs NA pour toutes les lignes
+nbtest <- nrow(data_test) #recupération du nombre de ligne du jeu de données test
+dim(data_train); dim(data_test)
+TotalDF <- rbind(data_train,data_test) # concatenation du jeu d'apprentissage et du jeu de données test pour l'imputation
+dim(TotalDF)
+```
+```{r}
+df <- TotalDF
+```
+
+### Variable à faibles variances et variables
+```{r}
+# Determination des variables à faible variance
+#ZeroVarTotal <- nearZeroVar(TotalDF)
+#names(TotalDF[,ZeroVarTotal]) # liste des variables à faible variance qui n'apportent presqu'aucune information au jeu de données.
+#TotalDF_VF <- TotalDF[,-ZeroVarTotal]
+```
+
+
+## II. GESTION DES DONNEES
+
+De coutume le jeu de données test ne contient pas de valeurs manquantes mais dans notre cas il en possede. Alors pour gérer ce cas de figure nous allons appliquer une démarche particuière. Cette méthode consiste à concatener les deux jeux de données (apprentissage et test), puis à effectuer une imputaion (stochastique) du tableau obtenu. Ensuite ajuster le modèle d’analyse sur les données d’apprentissage imputées (Xtrain, Ytrain). Enfin, prédire la variable cible (Ytest) à partir du modèle d’analyse ajusté et du jeu de données test imputé.
+
+
+## II.1. ANALYSE EXPLORATOIRE DES DONNEES MANQUANTES
+
+
+```{r echo=TRUE}
+# Visualisation de la distribution des données manquantes sur la jeu de données d'entrainement
+#vis_miss(df_train)
+```
+**Figure : Dispersion des données manquantes sur l'ensemble du jeu d'apprentissage**
+
+```{r echo=TRUE}
+# Visualisation de la distribution des données manquantes sur la jeu de données test
+#vis_miss(df_test)
+```
+**Figure : Dispersion des données manquantes sur l'ensemble du jeu test**
+
+```{r}
+# Visualisation de la distribution des données manquantes sur le jeu de données complet
+ech2 <- sample(1:nrow(df),900) # Nous effectuons un echantillonnage aléatoire pour les causes de mémoire 
+ech_df <- df[ech2,]
+vis_miss(ech_df)
+```
+**Figure1 : Dispersion des données manquantes sur l'ensemble du jeu de données concaténé**
+
+Nous constatons que les jeux de données (apprentissage et test) possèdent des données manquantes à environ les mêmes proportions, soit 26%. idem pour le jeu de données complet issu de la concaténation des données train et test. Les distributions des NA des jeux de donnnées train, test et concaténé sont sensiblement identiques et inegalement reparties. Ces similitudes nous conforte dans le sens que le même mécanisme de génération des valeurs absentes pourrait être à l'origine des NA dans les données train et test.  
+Nous pensons que les valeurs non observées pourraient être issues d'un mécanisme MAR ou MCAR. Pour être plus précis, nous effectuerons une étude approfondie pour savoir quel mécanisme est à l'origine de ces valeurs manquantes.
+Vu que le jeu de données commporte un nombre important de variables avec données manquantes, nous optons pour une analyse des correspondances multiples (ACM) qui nous permettra de visualiser le dispositif des données manquantes.
+
+### II.2. ANALYSE DU MODÈLE DES DONNÉES MANQUANTES
+
+  Pour appliquer l'analyse des correspondances multiples, nous considérons que toutes les variables du jeu de données ont deux catégories : m pour les données manquantes et o pour les valeurs observées. L'ACM mettra en évidence les associations entre paires de catégories en recherchant la dimenssion commune de variabilité entre les variables correspondantes. Ainsi, cette méthode montrera si des valeurs manquantes se produisent simultanement dans plusieurs variables ou si des valeurs manquantes se produisent lorsque d'autres variables sont observées. 
+  Au regarde de la figure ci-dessous, nous observons deux regroupements des valeurs manquantes, dont un groupe possédant de grandes coordonnées sur le premier axe factoriel alors que le deuxième groupe est plus representé sur le deuxième axe vertical. Cela nous permet de déduire que les valeurs manquantes semblent se prduisent simultanement. 
+  Au vu des resultats, nous pouvons affimer que le mécanisme de générartion des valeurs manquantes est MAR. Pour en être sûr, nous analyserons le mécanisme de données non observées.
+  
+
+```{r}
+# Creation of a categorical data set with "o" when observed and "m" when missing
+T_pattern <- matrix("o",nrow=nrow(df[,-666]),ncol=ncol(df[,-666]))
+T_pattern[is.na(df[,-666])] <- "m"
+T_pattern<-as.data.frame(T_pattern)
+dimnames(T_pattern) <- dimnames(df[,-666])
+
+# MCA
+T_res.mca<-MCA(T_pattern,graph=F)
+plot(T_res.mca,selectMod=grep("_m",rownames(T_res.mca$var$coord)),invisible="ind")
+```
+**Figure 4:** ACM du dispositif des données manquantes du jeu de données d'apprentissage et test.
+
+### II.2. ANALYSE MÉCANISME DE DONNÉES MANQUANTES
+Nous allons utiliser L'ACM dans cette partie pour déterminer le mécanisme des valeurs manquantes vu que les nombre de variable est important. Pour ce faire, Nous allons déterminer ici le lien existant entre le dispositif des données manquantes et les données observés. Ainsi, les données continues sont recodées en variables catégorielles et les données manquantes en tant que catégories des
+variables explicatives. La figure suivante resume les relations entre les catégories observées et les catégories manquantes. 
+L'observation de la figure, montre que les catégories observées etv manquantes participent à la construction des axes principaux.
+Ce qui confirme que nous sommes dans un processus de génération de données manquantes de type MAR.
+
+```{r}
+df_new <- df[,-666]
+```
+
+```{r echo=TRUE}
+df_train_RX <- df_new # Création d'un nouveau dataframe
+typevariable <- sapply(df_train_RX, class)
+df_train_RX[, which(typevariable=="numeric" | typevariable=="double" | typevariable=="integer")] <- lapply(df_train_RX[, which(typevariable=="numeric" | typevariable=="double" | typevariable=="integer")],FUN = as.factor) # Changement de la nature des variables
+```
+
+```{r echo=TRUE}
+res.MCA_RX<-MCA(df_train_RX,graph=F)
+plot(res.MCA_RX,choix="ind",invisible="ind")
+```
+**Figure 4: Visualisation du mécanisme des données manquantes des jeux de données d'apprntissage et test.**
+
+```{r}
+# Determination des variables à faible variance
+#ZeroVartest <- nearZeroVar(data_test)
+#ZeroVartest <- nearZeroVar(data_test)
+#ZeroVartest
+#for (col in ZeroVar){
+#  barplot(table(data_train[,col]),main = names(data_train)[col])
+#}
+```
+
+### réduction de dimension et Imputation
+
+```{r}
+col_rm <- c("C2A2","C2B2",
+"C2C2",
+"C2D2",
+"C2E2",
+"C2F2",
+"C2G2",
+"C2H2",
+"C2I2",
+"C2J2",
+"C2K2",
+"C2L2",
+"C2M2",
+"C2N2",
+"C2O2",
+"C2P2",
+"C2Q2",
+"C2R2",
+"C2S2",
+"C2T2",
+"C2U2",
+"C2V2",
+"C2W2",
+"C3A2",
+"C3A3",
+"C3B2",
+"C3B3",
+"C3C2",
+"C3C3",
+"C3F2",
+"C3F3",
+"C3F_T",
+"C3G2",
+"C3G3",
+"C3G4",
+"C3H2",
+"C3H3",
+"C3K_M",
+"E2B",
+"E2C",
+"E3B",
+"E3C",
+"E4B",
+"E4C",
+"E5B",
+"E7B",
+"E9B",
+"E11B",
+"E11C",
+"E12B",
+"H1_LT",
+"H1_30",
+"H2_LT",
+"H2_30",
+"H3_LT",
+"H3_30",
+"H4_LT",
+"H4_30",
+"H5_LT",
+"H5_30",
+"H6_LT",
+"H6_30",
+"H7_LT",
+"H7_30",
+"H8_LT",
+"H8_30",
+"H9_LT",
+"H9_30",
+"H10_LT",
+"H10_30",
+"H11_LT",
+"H11_30",
+"H12_LT",
+"H12_30",
+"H13_LT",
+"H13_30",
+"K2",
+"K3",
+"P1B",
+"P1C",
+"P2B",
+"P2C",
+"P5B ",
+"P6B",
+"P6C",
+"T1B",
+"T1C",
+"T2B ",
+"T2C",
+"T3B",
+"T3C")
+```
+
+```{r}
+dfdataset <- df[, !(names(df) %in% col_rm)]
+dim(dfdataset)
+```
+
+```{r}
+TotalDfPour_new <- data.frame (
+  Name = names(dfdataset),
+  Pourcentage = sapply(dfdataset,function(x) paste(round(sum(is.na(x))*100/nrow(dfdataset),2)))
+)
+#summary(TotalDfPour_new)
+remcol <- row.names(TotalDfPour_new[TotalDfPour_new$Pourcentage > "70",])
+#length(remcol) 
+#View(TotalDfPour_new)
+dfdataset_new<- dfdataset[, !(names(dfdataset) %in% remcol)]
+dim(dfdataset_new)
+``` 
+
+### Imputation par k-plus proches voisins
+```{r}
+#imputation par KNN avec k=5
+Imputdf <- kNN(dfdataset_new, imp_var = FALSE) # le choix de k = 5 car il conserve les memes distributions avant et apres imputation
+```
+
+```{r}
+# Vérifions que toutes les variables ont été imputées correctement
+T_new <- data.frame (
+  Name = names(Imputdf),
+  P = sapply(Imputdf,function(x) paste(round(sum(is.na(x))*100/nrow(Imputdf),2)))
+)
+#summary(TotalDfPour_new)
+r <- row.names(T_new[T_new$P !="0",])
+r
+```
+
+```{r}
+#sauvegardons les dataset imputé
+save(Imputdf, file = "Imputdf_By_KNN.rda")
+```
+
+
+### Distributions des variables avant et après imputation
+
+```{r}
+# les variables quantitatives:
+quant <- which(sapply(Imputdf,class)=="integer" | typevariable=="numeric" | typevariable=="double")
+quant <- names(dfdataset_new)[quant]
+quant
+length(quant)
+```
+
+```{r}
+# les variables qualitatives sont :
+qual <- which(sapply(Imputdf,class)=="factor")
+qual <- names(dfdataset_new)[qual]
+#qual
+#length(qual) 
+```
+
+```{r}
+qual1 <- qual[1:15]
+```
+
+```{r}
+par(mfrow = c(1,2))
+for (col in qual1){
+  barplot(table(Imputdf[,col]),main =paste(col,"Imputé",sep = " "),col = "green",lwd = 2)
+  barplot(table(dfdataset_new[,col]),main = paste(col,"Non imputé",sep = " "),col = "red",lwd = 2)
+}
+```
+
+```{r}
+quant1 <- quant[1:10]
+par(mfrow = c(1,2))
+for (col in quant1){
+  barplot(table(Imputdf[,col]),main =paste(col,"Imputé",sep = " "),col = "green",lwd = 2)
+  barplot(table(dfdataset_new[,col]),main = paste(col,"Non imputé",sep = " "),col = "red",lwd = 2)
+}
+```
+
+### Variables à faible variance
+```{r}
+LowVar<- nearZeroVar(Imputdf)
+LowVar
+# Retirons les variables avec une faible variance
+ImputdfNew <- Imputdf[,-LowVar]
+dim(ImputdfNew)
+```
+```{r}
+length(LowVar)
+```
+
+
+## Classification des variables et reduction de dimension
+
+```{r}
+# Visualisation de la distribution des données manquantes sur la jeu de données complet
+EchImpdf <- sample(1:nrow(ImputdfNew),304) # Nous effectuons un echantillonnage aléatoire pour les causes de mémoire  
+# calucul éffectué selon le site https://fr.checkmarket.com/calculateur-taille-echantillon/
+Ech_ImputdfNew <- ImputdfNew[EchImpdf,]
+dim(Ech_ImputdfNew)
+```
+
+
+```{r, warning=FALSE}
+# séparation des variables qualitatives et quantitatives
+xquanti <- PCAmixdata::splitmix(Ech_ImputdfNew)$X.quanti
+#xquanti <- scale(xquanti,center = TRUE)
+xquali <- PCAmixdata::splitmix(Ech_ImputdfNew[,-525])$X.quali
+```
+
+```{r, warning=FALSE}
+tree.Imputdf<- hclustvar(xquanti,xquali)
+```
+
+```{r}
+#Aggregation levels plot
+plot(tree.Imputdf,type="index")
+```
+```{r}
+ Ech_ImputdfNew1<- Ech_ImputdfNew
+Ech_ImputdfNew1 <- aperm(apply(Ech_ImputdfNew1, 1, function(x) as.numeric(x)))
+factoextra::fviz_nbclust(Ech_ImputdfNew1, 
+                         FUNcluster =factoextra::hcut, 
+                         method = c("silhouette", "wss", "gap_stat"),
+                         k.max = 40,
+                         hc_method = "average", 
+                         hc_metric = "euclidean", 
+                         stand = TRUE)
+```
+
+```{r}
+partition1 <- cutreevar(tree.Imputdf,k=20)
+```
+
+```{r}
+# Mis en commentaire pour des raisons d'espace et de visibilité sur le code 
+# summary(partition1)
+```
+
+# déterminons les variables representantes de chaque groupe
+
+### a - variables qualitatives
+
+```{r}
+#Liste des variables qualitatives
+var.factor <- which(sapply(Ech_ImputdfNew,class)=="factor")
+#names(var.factor)
+
+#Creation d'une matrice contenant les variables qualitatives
+Ech_ImputdfNew.cramer <- Ech_ImputdfNew[,c(var.factor)]
+Ech_ImputdfNew.cramer <- Ech_ImputdfNew.cramer[,-which(colnames(Ech_ImputdfNew.cramer)=="outcome")]
+
+#calcul du V de cramer entre CARAVAN et les autres variables
+
+res.cramer <- sapply(Ech_ImputdfNew.cramer,
+                   FUN = function(xx,yy){CramerV(table(xx,yy))},
+                   yy = Ech_ImputdfNew$outcome)
+
+#tri par valeurs décroissantes
+res.cramer <- sort(res.cramer)
+
+#représentation
+par(mar=c(5, 15, 4, 2) + 0.1)
+barplot(res.cramer, horiz = TRUE, las = 2, xlab="V de Cramer")
+```
+
+
+### b-Variables quantitatives
+
+```{r}
+var.numeric <- which(sapply(Ech_ImputdfNew,class)=="numeric"|sapply(Ech_ImputdfNew,class)=="integer"|sapply(Ech_ImputdfNew,class)=="double")
+```
+
+```{r}
+Ech_ImputdfNew[,var.numeric] <- lapply(Ech_ImputdfNew[,var.numeric], function(x) as.numeric(x))
+```
+
+```{r, warning=FALSE}
+# calcul du rapport de corrélation entre les variables quanti et la variable CARAVAN
+vartot <- function(x) {
+  res1 <- sum((x - mean(x))^2)
+  return(res1)
+}
+#-------------------
+#vartot(notes)
+#-------------------
+varinter <- function(x, gpe) {
+  moyennes <- tapply(x, gpe, mean)
+  effectifs <- tapply(x, gpe, length)
+  res2 <- (sum(effectifs * (moyennes - mean(x))^2))
+  return(res2)
+}
+#-------------------
+eta2 <- function(x, gpe) {
+  res3 <- varinter(x, gpe)/vartot(x)
+  return(res3)
+}
+#-------------------
+```
+
+```{r, warning=FALSE}
+#for (i in n) {
+#    Rcorr <- eta2(Ech_ImputdfNew[,i], Ech_ImputdfNew$outcome)
+#    cat(i, " :", Rcorr,"\n" )
+#}
+#-------------------
+```
+
+
+```{r}
+#calcul des rapports de corrélation
+Ech_ImputdfNew[,var.numeric]<- aperm(apply(Ech_ImputdfNew[,var.numeric], 1, function(x) as.numeric(x)))
+library(BioStatR)
+#tri par valeurs décroissantes
+res.eta2 <- sapply(Ech_ImputdfNew[,var.numeric], eta2, Ech_ImputdfNew$outcome)
+res.eta2 <- sort(res.eta2)
+#représentation
+par(mar = c(5, 15, 4, 2) + 0.1, mfrow = c(1,1)) # pour gérer les marges du graphique
+barplot(res.eta2, horiz = TRUE, las = 2, xlab = expression(eta^2))
+```
+```{r}
+R.Corr.frame <- data.frame (
+  Name = names(Ech_ImputdfNew[,var.numeric]),
+  Coefs = sapply(Ech_ImputdfNew[,var.numeric], eta2, Ech_ImputdfNew$outcome)
+)
+
+V.Cramer.frame <- data.frame (
+  Name = names(Ech_ImputdfNew.cramer),
+  Coefs = sapply(Ech_ImputdfNew.cramer,
+                   FUN = function(xx,yy){CramerV(table(xx,yy))},
+                   yy = Ech_ImputdfNew$outcome)
+)
+# Dataframe des coéfficients et cramer et rapport de corrélation
+T.Cor.VCram.frame <- rbind(R.Corr.frame,V.Cramer.frame)  
+```
+
+
+Les variables retenues sont :  1:P4; 2:R1B; 3:E10A; 4:H19A; 5:Q11; 6:PC_REC7; 7:O1D; 8:D4; 9:B3J; 10:F1K; 11:Q1A; 12:R1H; 13: M6; 14:N1J; 15:N2M; 16:A14B; 17:U2C; 18:U12; 19:U25C; 20:ABUSE
+
+```{r}
+ClustRep <- c("P4","R1B","E10A","H19A","Q11","PC_REC7","O1D","D4","B3J","F1K","Q1A","R1H","M6","N1J","N2M","A14B","U2C","U12","U25C","ABUSE")
+Ech_ImputdfNew_RX <- Ech_ImputdfNew[,ClustRep]
+```
+```{r}
+print(ClustRep)
+```
+
+
+### Observons les relations entre les variables explicatives
+```{r}
+library(questionr) # V de Cramer
+library(DescTools) # V de Cramer
+library(rcompanion)
+library(corrplot)
+var.qual <- names(Ech_ImputdfNew_RX)
+mat <- matrix(rep(0,length(var.qual)*length(var.qual)),ncol = length(var.qual))
+for (i in 1:20){
+  for (j in 1:20){
+    mat[i,j] <- cramerV(table(Ech_ImputdfNew_RX[,var.qual[i]],Ech_ImputdfNew_RX[,var.qual[j]]))
+  }
+}
+
+# mettons les noms des lignes et colonnes par les noms des variables
+rownames(mat) <- var.qual
+colnames(mat) <- var.qual
+
+# Affichons la matrice
+PlotCorr(mat )
+
+# Importons les valeurs de la matrice en fichier txt
+sink("cramer.txt")
+print(mat)
+sink()
+```
+Par de risque de colinéarité.
+
+
+
+## MODELISATION
+
+```{r}
+# Recupérons les variables retenues pour la modélisation en plus de la variable reponse
+Var.ret <- c("P4","R1B","E10A","H19A","Q11","PC_REC7","O1D","D4","B3J","F1K","Q1A","R1H","M6","N1J","N2M","A14B","U2C","U12","U25C","ABUSE","outcome")
+Imput.df <- Imputdf[,Var.ret]
+#dim(Imput.df)
+
+# Séparons les jeux de données train et test
+# Jeu de données train
+Imp_df_train <- Imput.df[1:nbtrain,] # jeu de données d'apprentissage
+Imp_df_test <- Imput.df[nbtrain+1:nbtest,] # Je de données test
+```
+
+### Découpage du jeu de données train en apprentissage test
+
+```{r}
+# Découpage du jeu train pour la modélisation
+X_1 = Imp_df_train[,ClustRep] # Récupération des variables explicatives pour l'entrainement
+y_ <- Imp_df_train$outcome # recupération de la variable cible.
+# Vérifions que nous avons le même nombre de lignes pour le jeu d'entrainement et le jeu test.
+dim(X_1)[1] 
+length(y_)
+```
+
+```{r}
+# Vu que la plupart de nos modèles seront implémentés dans un environnement python, 
+# nous positionnons les variables d'environnement nécéssaires à cet effet.
+library(reticulate)
+use_python("/opt/anaconda3/envs/pyspark_env/bin/python3.10")
+```
+
+```{r, echo=FALSE}
+# installation des bibliothèques python
+# Si elles ne sont pas déjà executées
+py_install("scikit-learn")
+py_install("pandas")
+py_install("numpy")
+py_install("matplotlib")
+py_install("tensorflow")
+py_install("xgboost") # bibliothèque pour le boosting
+```
+
+
+
+```{python}
+# # Importattion des libraries python pour la modélisation
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import make_classification
+from sklearn.model_selection import *
+from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score
+```
+
+```{python}
+random_state =100
+df_X1=r.X_1
+df_y=r.y_
+# Découpage du jeu de données pour les besoins d'apprentissage des modèles.
+# Nous décidons de prendre 80% pour le jeu de données d'apprentissage et 20% pour le jeu de données test.
+X_train, X_test, y_train, y_test = train_test_split(df_X1,df_y,test_size=0.20, random_state=100)
+```
+
+
+```{r}
+# Fonction de Score
+F1_score <-
+function(y_pred, y_test) {
+  #gestion des cas particuliers où toutes les valeurs prédites sont identiques
+  if(length(unique(y_pred))==1){
+    if(unique(y_pred)=="1"){
+      # y_pred ne contient que des "1"
+      VP <- table(y_test)["1"]
+      precision <- VP/length(y_pred)
+      rappel <- 1
+      F1 <- 2*precision*rappel/(precision+rappel)
+      return(F1)
+    }else if(unique(y_pred)=="0"){
+      # y_pred ne contient que des "0"
+      return(0)
+    }
+  }
+  # autres cas
+  confusion <- table(y_pred,y_test)
+  VP <- confusion["1","1"]
+  if(VP==0){return(0)}
+  FP <- confusion["1","0"]
+  FN <- confusion["0","1"]
+  precision <- VP/(VP+FP)
+  rappel <- VP/(VP+FN)
+  F1 <- 2*precision*rappel/(precision+rappel)
+  return(F1)
+}
+```
+
+
+## 4.1. RANDOM FOREST
+
+```{python}
+# Construction de la grilles des combinaisons des hyperparamètres 
+# pour le modèle de orêt aléatoire
+RF_param_grid = {
+             'max_features': [1,2,3,4,5],
+             'min_impurity_decrease': [0.0,0.5],
+            'min_samples_leaf': [3,4,5],
+             'min_samples_split': [2,4,6],
+            'n_estimators': [100,120,130],
+             'max_leaf_nodes' :[70]
+              }       
+
+RF = RandomForestClassifier(random_state=100)
+clf = GridSearchCV(RF, RF_param_grid,cv=5,verbose=1)
+```
+
+```{python}
+# Entrainement du modèle
+clf.fit(X_train, y_train)
+```
+
+
+```{python}
+# Get the best parameters and best score from grid search
+clf_best_params = clf.best_params_
+clf_best_score = clf.best_score_
+print("Best Parameters:", clf_best_params)
+print("Best Score:", clf_best_score)
+
+# Use the best model from grid search for evaluation
+clf_best_model = clf.best_estimator_
+clf_accuracy = cross_val_score(clf_best_model, X_test, y_test, cv=5).mean()
+print("Randon Forest Accuracy:", clf_accuracy)
+```
+
+```{python}
+res_rf_train= list(clf_best_model.predict(X_train))
+res_rf_test= list(clf_best_model.predict(X_test))
+```
+
+```{python}
+# Les probabilités de prédiction 
+train_pred_prb = clf_best_model.predict_proba(X_train) 
+#len(train_pred_prb)
+```
+```{python}
+# Les probabilités de prédiction 
+test_pred_prb = clf_best_model.predict_proba(X_test)
+#len(test_pred_prb)
+```
+
+```{python}
+# Détermination des meilleurs paramètres
+rf_best_model = clf.best_estimator_
+rf_best_model
+```
+
+```{r}
+# Score en apprentissage
+print("------- Score F1 sur données d'apprentissage ------- ")
+F1_score(py$res_rf_train,py$y_train)
+print("------- Score F1 sur données test ------- ")
+# Score F1 en test
+F1_score(py$res_rf_test,py$y_test)
+```
+
+```{python}
+# Create confusion matrix
+confusion_matrix = pd.crosstab(pd.Series(y_test, name='Observé'), pd.Series(res_rf_test, name='Predict'))
+# Print the confusion matrix
+print("Confusion matrix")
+print(confusion_matrix)
+```
+
+```{r}
+# Install and load the pROC package
+#install.packages("pROC")
+library(pROC)
+# Compute ROC curve
+roc_obj_RF <- roc(py$y_test, py$test_pred_prb[,1])
+
+# Plot ROC curve
+plot(roc_obj_RF, main = "ROC Curve", print.auc = TRUE)
+```
+
+
+
+
+## 4.2. BAGGING
+
+```{python}
+from sklearn.ensemble import BaggingClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.model_selection import cross_val_predict
+```
+
+
+```{python}
+# Create a base classifier
+base_classifier = DecisionTreeClassifier()
+
+# Create a BaggingClassifier
+bagging_classifier = BaggingClassifier(base_classifier)
+
+# Define the hyperparameters to tune
+param_grid = {
+    'n_estimators': [10, 50, 100, 250, 500, 1000, 2000],
+    'max_samples': [0.5, 0.8, 1.0],
+    'max_features': [0.5, 0.8, 1.0]
+}
+```
+
+```{python}
+# Perform grid search with cross-validation
+grid_search = GridSearchCV(bagging_classifier, param_grid, cv=5 )
+grid_search.fit(X_train, y_train)
+```
+
+```{python}
+# Get the best parameters and best score from grid search
+bag_best_params = grid_search.best_params_
+bag_best_score = grid_search.best_score_
+print("Best Parameters:", bag_best_params)
+print("Best Score:", bag_best_score)
+
+# Use the best model from grid search for evaluation
+bag_best_model = grid_search.best_estimator_
+bag_accuracy = cross_val_score(bag_best_model, X_test, y_test, cv=5).mean()
+print("Bagging Accuracy:", bag_accuracy)
+```
+
+```{python}
+# Create confusion matrix
+res_bag_test= list(bag_best_model.predict(X_test))
+res_bag_train= list(bag_best_model.predict(X_train))
+bag_confusion_matrix = pd.crosstab(pd.Series(y_test, name='Observé'), pd.Series(res_bag_test, name='Predict'))
+# Print the confusion matrix
+print("Confusion matrix")
+print(bag_confusion_matrix)
+```
+
+```{python}
+bag_predicted_prob = cross_val_predict(bag_best_model, X_test, y_test, cv=5, method='predict_proba')[:, 1]
+```
+
+
+```{r}
+# Compute ROC curve
+# Les probabilités de prédiction 
+roc_obj_bag <- roc(py$y_test, py$bag_predicted_prob)
+
+# Plot ROC curve
+plot(roc_obj_bag, main = "ROC Curve", print.auc = TRUE)
+``` 
+
+
+
+```{r}
+# Score en apprentissage
+F1_score(py$res_bag_train,py$y_train)
+
+# Score F1 en test
+F1_score(py$res_bag_test,py$y_test)
+```
+
+
+
+## BOOSTING
+
+```{python}
+from sklearn.ensemble import AdaBoostClassifier
+boost_param_grid= {
+    'learning_rate': [0.1, 0.2, 0.3, 0.45, 0.5, 1],
+    'n_estimators': [50, 100, 200, 300, 1000]
+}
+
+adaboost = AdaBoostClassifier()
+GRadaboost = GridSearchCV(adaboost, boost_param_grid, cv=5)
+```
+
+
+```{python}
+GRadaboost.fit(X_train, y_train)
+```
+
+```{python}
+# Get the best parameters and best score
+ada_best_params = GRadaboost.best_params_
+ada_best_score = GRadaboost.best_score_
+print("Les meilleurs paramètres du boosting sont : ", ada_best_params) 
+print("Le meilleur score du boosting est : ", ada_best_score) 
+```
+
+```{python}
+# Use the best model from grid search for evaluation
+ada_best_model = GRadaboost.best_estimator_
+ada_accuracy = cross_val_score(ada_best_model, X_test, y_test, cv=5).mean()
+print("Boosting Accuracy:", ada_accuracy)
+```
+
+```{python}
+# Create confusion matrix
+res_boost_test= list(ada_best_model.predict(X_test))
+res_boost_train= list(ada_best_model.predict(X_train))
+boost_confusion_matrix = pd.crosstab(pd.Series(y_test, name='Observé'), pd.Series(res_boost_test, name='Predict'))
+# Print the confusion matrix
+print("Confusion matrix")
+print(boost_confusion_matrix)
+```
+
+
+
+```{python}
+boost_predicted_prob = cross_val_predict(ada_best_model, X_test, y_test, cv=5, method='predict_proba')[:, 1]
+```
+
+```{r}
+# Compute ROC curve
+# Les probabilités de prédiction 
+roc_obj_boost <- roc(py$y_test, py$boost_predicted_prob)
+
+# Plot ROC curve
+plot(roc_obj_boost, main = "ROC Curve", print.auc = TRUE)
+``` 
+
+
+
+```{r}
+# Score en apprentissage
+cat("Score F1 sur le jeu de données d'entrainement : ") 
+F1_score(py$res_boost_train,py$y_train)
+
+cat('Score F1 sur le jeu de données test : ')
+F1_score(py$res_boost_test,py$y_test)
+
+```
+
+
+## Importance des variables
+
+```{python}
+# Random forest
+pd.DataFrame(clf.best_estimator_.feature_importances_,
+              index = X_train.columns, 
+              columns = ["importance"]).sort_values(
+     "importance", 
+     ascending = False)
+```
+
+
+## 4.5. Soumission des données prédites au HELPfull Challenge
+
+```{r}
+# Récupération du jeu de données test pour les soumissions
+DF_TEST_FINAL <- Imp_df_test[,-21]
+```
+
+```{python}
+# Soumissions au challenge
+
+#----------- RANDOM FOREST ----------------
+# Prédiction sur le jeu de données test avec le modèle RF
+pred_HelpFull_RF = clf.predict(r.DF_TEST_FINAL)
+pred_HelpFull_RFBestModel = clf_best_model.predict(r.DF_TEST_FINAL)
+
+#----------- BAGGING ----------------
+# Prédiction sur le jeu de données test avec le BAGGING
+#pred_HelpFull_BAG = grid_search.predict(r.DF_TEST_FINAL)
+```
+
+```{r}
+# Soumissions des fichiers du challenge au format .csv
+#----------- RANDOM FOREST ----------------
+pred_HelpFull_RF <- py$pred_HelpFull_RF
+pred_HelpFull_RFBestModel <- py$pred_HelpFull_RFBestModel
+#----------- BAGGING ----------------
+pred_HelpFull_BAG <- py$pred_HelpFull_BAG
+#----------- BOOSTING ----------------
+
+#----------- génération des fichiers ----------------
+write(pred_HelpFull_RF, file = "pred_HelpFull_RF.csv")
+write(pred_HelpFull_BAG, file = "pred_HelpFull_BAG.csv")
+write(pred_HelpFull_RFBestModel, file = "pred_HelpFull_RFBestModel.csv")
+```
+
+
+
+
+
